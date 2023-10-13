@@ -1,3 +1,4 @@
+# Import necessary libraries
 import rospy
 import os
 import rospkg
@@ -8,19 +9,15 @@ import math
 import re
 from scipy.spatial.transform import Rotation
 
+# Import ROS messages and services
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState, DeleteModel, SpawnModel, SpawnModelRequest
-
 from pedsim_srvs.srv import SpawnInteractiveObstacles, SpawnInteractiveObstaclesRequest,SpawnObstacle, SpawnObstacleRequest, SpawnPeds, SpawnPed
 from pedsim_msgs.msg import InteractiveObstacle, AgentStates, Waypoints, LineObstacle, Ped, LineObstacles
-
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
-
 from std_msgs.msg import Empty
 from std_srvs.srv import Empty, SetBool, Trigger
-
 from rospkg import RosPack
-
 from task_generator.simulators.simulator_factory import SimulatorFactory
 from tf.transformations import quaternion_from_euler
 from ..constants import Constants, Pedsim
@@ -28,23 +25,28 @@ from .base_simulator import BaseSimulator
 from .simulator_factory import SimulatorFactory
 from task_generator.utils import Utils
 from nav_msgs.srv import GetMap
-
 import xml.etree.ElementTree as ET
 from task_generator.manager.pedsim_manager import PedsimManager
 
+# Define a constant for the timeout duration
 T = Constants.WAIT_FOR_SERVICE_TIMEOUT
 
+# Register the GazeboSimulator class with a factory for simulators
 @SimulatorFactory.register("gazebo")
 class GazeboSimulator(BaseSimulator):
     def __init__(self, namespace):
         super().__init__(namespace)
+        
+        # Initialize a publisher for goals
         self._goal_pub = rospy.Publisher(self._ns_prefix("/goal"), PoseStamped, queue_size=1, latch=True)
         self._robot_name = rospy.get_param("robot_model", "")
 
+        # Wait for Gazebo services to become available
         rospy.wait_for_service("/gazebo/spawn_urdf_model")
         rospy.wait_for_service("/gazebo/set_model_state")
         rospy.wait_for_service("/gazebo/set_model_state", timeout=20)
 
+        # Create service proxies for Gazebo services
         self._spawn_model_srv = rospy.ServiceProxy(
             self._ns_prefix("gazebo", "spawn_urdf_model"), SpawnModel
         )
@@ -54,22 +56,31 @@ class GazeboSimulator(BaseSimulator):
         self.unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
         self.pause = rospy.ServiceProxy("/gazebo/pause_physics", Empty)
 
+        # Initialize a map manager
         self.map_manager = None
         self.spawned_obstacles = []
+        
+        # Define the path to the default actor model file
         rospack1 = RosPack()
         pkg_path = rospack1.get_path('pedsim_gazebo_plugin')
         default_actor_model_file = pkg_path + "/models/actor_model.sdf"
-        # default_actor_model_file = pkg_path + "/models/prius.sdf"
-
+        
+        # Read the actor model file
         actor_model_file = rospy.get_param('~actor_model_file', default_actor_model_file)
         file_xml = open(actor_model_file)
         self.xml_string = file_xml.read()
         print("Waiting for gazebo services...")
+        
+        # Wait for Gazebo services related to spawning and deleting models
         rospy.wait_for_service("gazebo/spawn_sdf_model")
         rospy.wait_for_service("gazebo/delete_model")
+        
+        # Create service proxies for model spawning and deletion
         self.spawn_model = rospy.ServiceProxy("gazebo/spawn_sdf_model", SpawnModel)
         self.remove_model_srv = rospy.ServiceProxy("gazebo/delete_model", DeleteModel)
         print("service: spawn_sdf_model is available ....")
+        
+        # If Pedsim is enabled, set parameters and subscribe to Pedsim topics
         if rospy.get_param("pedsim"):
             rospy.set_param("respawn_dynamic", True)
             rospy.set_param("respawn_static", True)
@@ -77,6 +88,7 @@ class GazeboSimulator(BaseSimulator):
             rospy.Subscriber("/pedsim_simulator/simulated_waypoints", Waypoints, self.interactive_actor_poses_callback)
             rospy.Subscriber("/pedsim_simulator/simulated_agents", AgentStates, self.dynamic_actor_poses_callback)
 
+    # Callback for interactive actor poses (sychronise pedsim static and interactive obstacles with the gazebo interactive and static obsatcle)
     def interactive_actor_poses_callback(self, actors):
         if rospy.get_param("respawn_interactive"):
             for actor in actors.waypoints:
@@ -85,7 +97,7 @@ class GazeboSimulator(BaseSimulator):
                     orientation = float( re.findall(r'\(.*?\)', str(actor.name))[0].replace("(","").replace(")","").replace(",","."))
                     direction_x = float( actor.name[actor.name.index("{")+1: actor.name.index("}")].replace(",","."))
                     direction_y = float( actor.name[actor.name.index("[")+1: actor.name.index("]")].replace(",","."))
-                    ob_type =            actor.name[actor.name.index("&")+1: actor.name.index("!")]
+                    ob_type = actor.name[actor.name.index("&")+1: actor.name.index("!")]
                     rot = Rotation.from_euler('xyz', [0, 0, orientation], degrees=False)
                     rot_quat = rot.as_quat()
 
@@ -142,6 +154,7 @@ class GazeboSimulator(BaseSimulator):
                     self.spawned_obstacles.append(actor_name)
                     rospy.set_param("respawn_static", False)
 
+    # Callback for dynamic actor poses sychronise pedsim  dynamic obstacles with the gazebo dynamic obsatcle)
     def dynamic_actor_poses_callback(self, actors):
         if rospy.get_param("respawn_dynamic"):
             for actor in actors.agent_states:

@@ -1,113 +1,105 @@
-import rospkg
-import os
+import rospkg  # Import the 'rospkg' module for ROS package handling
+import os  # Import the 'os' module for working with the file system
 
-from abc import abstractmethod
-from pedsim_msgs.msg import Ped
-from geometry_msgs.msg import Point
-from task_generator.constants import Pedsim
+from abc import abstractmethod  # Import the 'abstractmethod' decorator
+from pedsim_msgs.msg import Ped  # Import the 'Ped' message from 'pedsim_msgs'
+from geometry_msgs.msg import Point  # Import the 'Point' message from 'geometry_msgs'
+from task_generator.constants import Pedsim  # Import constants from 'task_generator'
 
+import rospy  # Import the ROS Python library
+import random  # Import the 'random' module for randomization
+import subprocess  # Import 'subprocess' for running external commands
+import numpy as np  # Import 'numpy' for numerical operations
+import math  # Import 'math' for mathematical functions
+import re  # Import 're' for regular expressions
+from scipy.spatial.transform import Rotation  # Import 'Rotation' from 'scipy.spatial.transform'
 
-import rospy
-import random
-import subprocess
-import numpy as np
-import math
-import re
-from scipy.spatial.transform import Rotation
-
-
-from pedsim_srvs.srv import SpawnInteractiveObstacles, SpawnInteractiveObstaclesRequest,SpawnObstacle, SpawnObstacleRequest, SpawnPeds, SpawnPed
+# Import various ROS messages, services, and package dependencies
+from pedsim_srvs.srv import SpawnInteractiveObstacles, SpawnInteractiveObstaclesRequest, SpawnObstacle, SpawnObstacleRequest, SpawnPeds, SpawnPed
 from pedsim_msgs.msg import InteractiveObstacle, AgentStates, Waypoints, LineObstacle, Ped, LineObstacles
-
 from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
-
 from std_msgs.msg import Empty
 from std_srvs.srv import Empty, SetBool, Trigger
-
 from rospkg import RosPack
-
 from task_generator.simulators.simulator_factory import SimulatorFactory
 from tf.transformations import quaternion_from_euler
 from ..constants import Constants, Pedsim
 from task_generator.utils import Utils
 from nav_msgs.srv import GetMap
+import xml.etree.ElementTree as ET  # Import 'xml.etree.ElementTree' for XML parsing
 
-import xml.etree.ElementTree as ET
-
+# Define a constant 'T' for the timeout duration
 T = Constants.WAIT_FOR_SERVICE_TIMEOUT
 
-class PedsimManager():  
+# Define the 'PedsimManager' class
+class PedsimManager():
     def __init__(self, namespace):
+        # Initialize the 'PedsimManager' with a ROS namespace
         self._ns_prefix = lambda *topic: os.path.join(namespace, *topic)
+        
+        # Create a publisher for setting goals
         self._goal_pub = rospy.Publisher(self._ns_prefix("/goal"), PoseStamped, queue_size=1, latch=True)
 
+        # Get the robot name from ROS parameters
         self._robot_name = rospy.get_param("robot_model", "")
 
         if rospy.get_param("pedsim"):
+            # Wait for various Pedsim services to become available
             rospy.wait_for_service("/pedsim_simulator/spawn_peds", timeout=T)
             rospy.wait_for_service("/pedsim_simulator/reset_all_peds", timeout=T)
             rospy.wait_for_service("/pedsim_simulator/remove_all_peds", timeout=T)
-            rospy.wait_for_service("pedsim_simulator/respawn_peds" , timeout=T)
-            rospy.wait_for_service("pedsim_simulator/respawn_interactive_obstacles" , timeout=T)
-            rospy.wait_for_service("pedsim_simulator/remove_all_interactive_obstacles" , timeout=T)
+            rospy.wait_for_service("pedsim_simulator/respawn_peds", timeout=T)
+            rospy.wait_for_service("pedsim_simulator/respawn_interactive_obstacles", timeout=T)
+            rospy.wait_for_service("pedsim_simulator/remove_all_interactive_obstacles", timeout=T)
             rospy.wait_for_service("pedsim_simulator/add_obstacle", timeout=T)
-        
-        self._spawn_peds_srv = rospy.ServiceProxy(
-            "/pedsim_simulator/spawn_peds", SpawnPeds
-        )
-        self._remove_peds_srv = rospy.ServiceProxy(
-            "/pedsim_simulator/remove_all_peds", SetBool
-        )
-        self._reset_peds_srv = rospy.ServiceProxy(
-            "/pedsim_simulator/reset_all_peds", Trigger
-        )
+
+        # Create service proxies for Pedsim services
+        self._spawn_peds_srv = rospy.ServiceProxy("/pedsim_simulator/spawn_peds", SpawnPeds)
+        self._remove_peds_srv = rospy.ServiceProxy("/pedsim_simulator/remove_all_peds", SetBool)
+        self._reset_peds_srv = rospy.ServiceProxy("/pedsim_simulator/reset_all_peds", Trigger)
         self.__respawn_interactive_obstacles_srv = rospy.ServiceProxy(
-        "pedsim_simulator/respawn_interactive_obstacles" ,SpawnInteractiveObstacles, persistent=True)
-    
+            "pedsim_simulator/respawn_interactive_obstacles", SpawnInteractiveObstacles, persistent=True)
         self.__remove_all_interactive_obstacles_srv = rospy.ServiceProxy(
-        "pedsim_simulator/remove_all_interactive_obstacles" ,Trigger)
-
+            "pedsim_simulator/remove_all_interactive_obstacles", Trigger)
         self.spawn_interactive_obstacles_srv = rospy.ServiceProxy(
-        "pedsim_simulator/spawn_interactive_obstacles" ,SpawnInteractiveObstacles, persistent=True)
-
+            "pedsim_simulator/spawn_interactive_obstacles", SpawnInteractiveObstacles, persistent=True)
         self.__respawn_peds_srv = rospy.ServiceProxy(
-            "pedsim_simulator/respawn_peds" , SpawnPeds, persistent=True)
-
+            "pedsim_simulator/respawn_peds", SpawnPeds, persistent=True)
         self._spawn_peds_srv = rospy.ServiceProxy(
             "pedsim_simulator/spawn_peds", SpawnPeds)
-
         self.__add_obstacle_srv = rospy.ServiceProxy(
-            "pedsim_simulator/add_obstacle" ,SpawnObstacle, persistent=True)
+            "pedsim_simulator/add_obstacle", SpawnObstacle, persistent=True)
 
-
-        self.map_manager = None
+        self.map_manager = None  # Initialize the map manager as None
 
     def create_pedsim_obstacle(self, dynamic, i, map_manager, forbidden_zones):
+        # Create a Pedsim obstacle with dynamic and static properties
         self.map_manager = map_manager
         safe_distance = 0.5
-        [x, y, theta] = self.map_manager.get_random_pos_on_map(safe_distance, forbidden_zones) # check later for the need of free indicies and map papram
+        [x, y, theta] = self.map_manager.get_random_pos_on_map(safe_distance, forbidden_zones)
 
-        if dynamic == True :
-            waypoints = np.array( [x, y, 1]).reshape(1, 3) # the first waypoint
-            safe_distance = 0.1 # the other waypoints don't need to avoid robot
-            for j in range(10): 
+        if dynamic == True:
+            waypoints = np.array([x, y, 1]).reshape(1, 3)  # The first waypoint
+            safe_distance = 0.1
+            for j in range(10):
                 dist = 0
                 while dist < 8:
-                    [x2, y2, theta2] = self.map_manager.get_random_pos_on_map( safe_distance, forbidden_zones)
-                    dist = np.linalg.norm([waypoints[-1,0] - x2,waypoints[-1,1] - y2])
+                    [x2, y2, theta2] = self.map_manager.get_random_pos_on_map(safe_distance, forbidden_zones)
+                    dist = np.linalg.norm([waypoints[-1, 0] - x2, waypoints[-1, 1] - y2])
                 waypoints = np.vstack([waypoints, [x2, y2, 1]])
-            ped=np.array([i+1, [x, y, 0.0], waypoints],dtype=object)
+            ped = np.array([i + 1, [x, y, 0.0], waypoints], dtype=object)
         else:
-            ped=np.array([i+1, [x, y, 0.0]],dtype=object)
-        
+            ped = np.array([i + 1, [x, y, 0.0]], dtype=object)
+
         return ped
 
     def spawn_pedsim_obstacles(self, obstacles, type="shelf", yaml="shelf.yaml", interaction_radius=0.0):
+        # Spawn Pedsim static or interactive obstacles
         srv = SpawnInteractiveObstacles()
         srv.InteractiveObstacles = []
         i = 0
-        self.agent_topic_str=''   
-        while i < len(obstacles) : 
+        self.agent_topic_str = ''
+        while i < len(obstacles):
             msg = InteractiveObstacle()
             obstacle = obstacles[i]
             msg.pose = Pose()
@@ -116,9 +108,9 @@ class PedsimManager():
             msg.pose.position.z = obstacle[1][2]
 
             if interaction_radius == 0.0:
-                self.agent_topic_str+=f',{self._ns_prefix}pedsim_static_obstacle_{obstacle[0]}/0' 
+                self.agent_topic_str += f',{self._ns_prefix}pedsim_static_obstacle_{obstacle[0]}/0'
             else:
-                self.agent_topic_str+=f',{self._ns_prefix}pedsim_interactive_obstacle_{obstacle[0]}/0'
+                self.agent_topic_str += f',{self._ns_prefix}pedsim_interactive_obstacle_{obstacle[0]}/0'
 
             msg.type = type
             msg.interaction_radius = interaction_radius
@@ -127,43 +119,40 @@ class PedsimManager():
                 "obstacles", yaml
             )
             srv.InteractiveObstacles.append(msg)
-            i = i+1
+            i = i + 1
 
         max_num_try = 1
         i_curr_try = 0
-        print("trying to call service with interactive obstacles: ")    
+        print("trying to call service with interactive obstacles: ")
 
         while i_curr_try < max_num_try:
-        # try to call service
-            response=self.spawn_interactive_obstacles_srv.call(srv.InteractiveObstacles)
+            # Try to call the service to spawn interactive obstacles
+            response = self.spawn_interactive_obstacles_srv.call(srv.InteractiveObstacles)
 
-            if not response.success:  # if service not succeeds, do something and redo service
-                # rospy.logwarn(
-                #     f"spawn static obstacle failed! trying again... [{i_curr_try+1}/{max_num_try} tried]")
+            if not response.success:  # If the service call is not successful, retry
                 i_curr_try += 1
             else:
                 break
         rospy.set_param(f'{self._ns_prefix}agent_topic_string', self.agent_topic_str)
         rospy.set_param("respawn_static", True)
         rospy.set_param("respawn_interactive", True)
-        return
 
     def spawn_pedsim_dynamic_obstacles(self, peds, type="adult", yaml="person_two_legged.model.yaml"):
+        # Spawn dynamic Pedsim obstacles
         srv = SpawnPeds()
         srv.peds = []
         i = 0
-        self.agent_topic_str=''   
-        while i < len(peds) : 
+        self.agent_topic_str = ''
+        while i < len(peds):
             msg = Ped()
             ped = peds[i]
-            msg.id = ped[0]+20
-
+            msg.id = ped[0] + 20
             msg.pos = Point()
             msg.pos.x = ped[1][0]
             msg.pos.y = ped[1][1]
             msg.pos.z = ped[1][2]
 
-            self.agent_topic_str+=f',pedsim_agent_{ped[0]}/0' 
+            self.agent_topic_str += f',pedsim_agent_{ped[0]}/0'
             msg.type = type
             msg.yaml_file = os.path.join(
                 rospkg.RosPack().get_path("arena-simulation-setup"),
@@ -194,7 +183,7 @@ class PedsimManager():
             msg.force_factor_obstacle = Pedsim.FORCE_FACTOR_OBSTACLE
             msg.force_factor_social = Pedsim.FORCE_FACTOR_SOCIAL
             msg.force_factor_robot = Pedsim.FORCE_FACTOR_ROBOT
-            msg.waypoint_mode = Pedsim.WAYPOINT_MODE 
+            msg.waypoint_mode = Pedsim.WAYPOINT_MODE
 
             msg.waypoints = []
 
@@ -205,59 +194,27 @@ class PedsimManager():
                 p.z = pos[2]
                 msg.waypoints.append(p)
             srv.peds.append(msg)
-            i = i+1
+            i = i + 1
 
         max_num_try = 1
         i_curr_try = 0
         while i_curr_try < max_num_try:
-        # try to call service
-            response=self.__respawn_peds_srv.call(srv.peds)
+            # Try to call the service to respawn dynamic obstacles
+            response = self.__respawn_peds_srv.call(srv.peds)
 
-            if not response.success:  # if service not succeeds, do something and redo service
-                # rospy.logwarn(
-                #     f"spawn human failed! trying again... [{i_curr_try+1}/{max_num_try} tried]")
+            if not response.success:  # If the service call is not successful, retry
                 i_curr_try += 1
             else:
                 break
         rospy.set_param(f'{self._ns_prefix}agent_topic_string', self.agent_topic_str)
         rospy.set_param("respawn_dynamic", True)
 
-        # USE THE FOLLOWING CODE TO SPAWN ACTORS WITHOUT PEDSIM
-
-        # self.agent_topic_str=''  
-        # for ped in peds: 
-        #     id, pose, waypoints = ped
-        #     x, y, theta = pose
-
-        #     rospy.loginfo("Spawning model: actor_id = %s", id)
-
-        #     model_pose = Pose(Point(x=x,
-        #                           y=y,
-        #                           z=0), Quaternion())
-        #     new_xml_string= self.xml_string.replace("0 0 0.75", str(x) + " " + str(y) +" 0.75")
-        #     new_xml_string= new_xml_string.replace("actor2", str(id))
-        #     new_xml_string= new_xml_string.replace(
-        #        "__waypoints__", 
-        #        "".join(
-        #           [
-        #              f"<waypoint>{x} {y} {theta}</waypoint>" for x, y, theta in waypoints
-        #             ]
-        #           )
-        #         )
-
-        #     self.spawn_model(str(id), new_xml_string, "", model_pose, "world")
-        #     # self.spawn_model(actor_id, self.xml_string, "", model_pose, "world")
-        #     rospy.set_param("respawn_dynamic", False)
-
-        # self._peds = peds
-        # rospy.set_param(f'{self._ns_prefix}agent_topic_string', self.agent_topic_str)
-        return
-
     def spawn_pedsim_map_obstacles(self):
+        # Spawn Pedsim map obstacles based on an XML file gets generated by arena tools (contains coordination of the inner borders) (spawning the inner map bordres as walls in pedsim)
         map = rospy.get_param("map_file")
         map_path = os.path.join(
-            rospkg.RosPack().get_path("arena-simulation-setup"), 
-            "worlds", 
+            rospkg.RosPack().get_path("arena-simulation-setup"),
+            "worlds",
             map,
             "ped_scenarios",
             f"{map}.xml"
@@ -267,11 +224,11 @@ class PedsimManager():
 
         forbidden_zones = []
 
-        add_pedsim_srv=SpawnObstacleRequest()
+        add_pedsim_srv = SpawnObstacleRequest()
         for child in root:
-            lineObstacle=LineObstacle()
-            lineObstacle.start.x,lineObstacle.start.y=float(child.attrib['x1']),float(child.attrib['y1'])
-            lineObstacle.end.x,lineObstacle.end.y=float(child.attrib['x2']),float(child.attrib['y2'])
+            lineObstacle = LineObstacle()
+            lineObstacle.start.x, lineObstacle.start.y = float(child.attrib['x1']), float(child.attrib['y1'])
+            lineObstacle.end.x, lineObstacle.end.y = float(child.attrib['x2']), float(child.attrib['y2'])
             add_pedsim_srv.staticObstacles.obstacles.append(lineObstacle)
             forbidden_zones.append([lineObstacle.start.x, lineObstacle.start.y, 1])
             forbidden_zones.append([lineObstacle.end.x, lineObstacle.end.y, 1])
@@ -281,14 +238,15 @@ class PedsimManager():
 
     # SCENARIO INTEGRATION
     def spawn_pedsim_dynamic_scenario_obstacles(self, peds):
+        # Spawn dynamic Pedsim obstacles for a scenario
         srv = SpawnPeds()
         srv.peds = []
         i = 0
-        self.agent_topic_str=''   
-        while i < len(peds) : 
+        self.agent_topic_str = ''
+        while i < len(peds):
             ped = peds[i]
             msg = Ped()
-            msg.id = i 
+            msg.id = i
 
             msg.pos = Point()
             msg.pos.x = ped["pos"][0]
@@ -298,16 +256,16 @@ class PedsimManager():
             msg.waypoints = []
             for pos in ped["waypoints"]:
                 p = Point()
-            p.x = pos[0]
-            p.y = pos[1]
-            p.z = 0
-            msg.waypoints.append(p)
+                p.x = pos[0]
+                p.y = pos[1]
+                p.z = 0
+                msg.waypoints.append(p)
             msg.yaml_file = os.path.join(
                 rospkg.RosPack().get_path("arena-simulation-setup"),
                 "dynamic_obstacles",
                 "person_two_legged.model.yaml")
 
-            self.agent_topic_str+=f',pedsim_agent_{i}/0' 
+            self.agent_topic_str += f',pedsim_agent_{i}/0'
             msg.type = "adult"
             msg.number_of_peds = 1
             msg.vmax = ped["vmax"]
@@ -333,45 +291,40 @@ class PedsimManager():
             msg.force_factor_obstacle = ped["force_factor_obstacle"]
             msg.force_factor_social = ped["force_factor_social"]
             msg.force_factor_robot = ped["force_factor_robot"]
-            msg.waypoint_mode = ped["waypoint_mode"] # or 1 check later
+            msg.waypoint_mode = ped["waypoint_mode"]
 
             srv.peds.append(msg)
-            i = i+1
+            i = i + 1
 
         max_num_try = 1
         i_curr_try = 0
         while i_curr_try < max_num_try:
-        # try to call service
-            response=self.__respawn_peds_srv.call(srv.peds)
+            # Try to call the service to respawn dynamic obstacles for the scenario
+            response = self.__respawn_peds_srv.call(srv.peds)
 
-            if not response.success:  # if service not succeeds, do something and redo service
-                # rospy.logwarn(
-                #     f"spawn human failed! trying again... [{i_curr_try+1}/{max_num_try} tried]")
-                # rospy.logwarn(response.message)
+            if not response.success:  # If the service call is not successful, retry
                 i_curr_try += 1
             else:
                 break
         self._peds = peds
         rospy.set_param(f'{self._ns_prefix}agent_topic_string', self.agent_topic_str)
         rospy.set_param("respawn_dynamic", True)
-        return
 
     def spawn_pedsim_scenario_obstacles(self, obstacles, interaction_radius=0.0):
+        # Spawn Pedsim static or interactive obstacles for a scenario
         srv = SpawnInteractiveObstacles()
         srv.InteractiveObstacles = []
         i = 0
-        self.agent_topic_str=''   
-        while i < len(obstacles) : 
+        self.agent_topic_str = ''
+        while i < len(obstacles):
             msg = InteractiveObstacle()
             obstacle = obstacles[i]
-            # msg.id = obstacle[0]
-
             msg.pose = Pose()
             msg.pose.position.x = obstacle["pos"][0]
             msg.pose.position.y = obstacle["pos"][1]
             msg.pose.position.z = 0
 
-            self.agent_topic_str+=f',{self._ns_prefix}pedsim_static_obstacle_{i}/0' 
+            self.agent_topic_str += f',{self._ns_prefix}pedsim_static_obstacle_{i}/0'
             msg.type = "shelf"
             msg.interaction_radius = interaction_radius
             msg.yaml_path = os.path.join(
@@ -379,29 +332,26 @@ class PedsimManager():
                 "obstacles", "shelf.yaml"
             )
             srv.InteractiveObstacles.append(msg)
-            i = i+1
+            i = i + 1
 
         max_num_try = 1
         i_curr_try = 0
-        print("trying to call service with static obstacles: ")    
+        print("trying to call service with static obstacles: ")
 
         while i_curr_try < max_num_try:
-        # try to call service
-            response=self.spawn_interactive_obstacles_srv.call(srv.InteractiveObstacles)
+            # Try to call the service to spawn static obstacles for the scenario
+            response = self.spawn_interactive_obstacles_srv.call(srv.InteractiveObstacles)
 
-            if not response.success:  # if service not succeeds, do something and redo service
-                # rospy.logwarn(
-                #     f"spawn human failed! trying again... [{i_curr_try+1}/{max_num_try} tried]")
+            if not response.success:  # If the service call is not successful, retry
                 i_curr_try += 1
             else:
                 break
-        # self._peds.append(peds)
         rospy.set_param(f'{self._ns_prefix}agent_topic_string', self.agent_topic_str)
         rospy.set_param("respawn_static", True)
         rospy.set_param("respawn_interactive", True)
-        return
 
     def remove_interactive_obstacles_pedsim(self):
+        # Remove all Pedsim interactive obstacles
         if rospy.get_param("pedsim"):
             self.__remove_all_interactive_obstacles_srv.call()
         return
